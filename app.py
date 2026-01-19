@@ -1,77 +1,78 @@
 import os
 import time
 import requests
-from flask import Flask, request, Response, send_from_directory
+from flask import Flask, Response, send_from_directory
 from twilio.twiml.voice_response import VoiceResponse
 
 app = Flask(__name__)
 
-# Read secrets from environment variables (best practice for Render)
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "")
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "")  # e.g. https://your-service.onrender.com
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL")
 
-@app.get("/")
+@app.route("/", methods=["GET"])
 def health():
     return "OK"
 
-@app.get("/static/<path:filename>")
+@app.route("/static/<path:filename>")
 def static_files(filename):
     return send_from_directory("static", filename)
 
-@app.post("/voice")
+@app.route("/voice", methods=["POST", "GET"])
 def voice():
-    # Basic script for proof-of-integration
-    text = (
-        "Hello. This is your Eleven Labs voice, delivered through Twilio. "
-        "Your integration is working."
+    resp = VoiceResponse()
+
+    question = "Please say your first and last name after the tone."
+
+    filename = f"q_{int(time.time())}.mp3"
+    filepath = f"static/{filename}"
+    generate_voice(question, filepath)
+
+    gather = resp.gather(
+        input="speech",
+        action="/process-name",
+        method="POST",
+        speechTimeout="auto"
     )
 
-    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID or not PUBLIC_BASE_URL:
-        resp = VoiceResponse()
-        resp.say("Configuration error. Missing environment variables.")
-        return Response(str(resp), mimetype="text/xml")
+    gather.play(f"{PUBLIC_BASE_URL}/{filepath}")
 
-    # Generate a unique filename per call to avoid conflicts
-    fname = f"tts_{int(time.time())}.mp3"
-    local_path = os.path.join("static", fname)
-
-    try:
-        generate_elevenlabs_tts(text, local_path)
-    except Exception:
-        resp = VoiceResponse()
-        resp.say("I could not generate speech from Eleven Labs.")
-        return Response(str(resp), mimetype="text/xml")
-
-    audio_url = f"{PUBLIC_BASE_URL}/static/{fname}"
-
+    resp.say("We did not receive your response. Goodbye.")
+    return Response(str(resp), mimetype="text/xml")
+@app.route("/process-name", methods=["POST"])
+def process_name():
     resp = VoiceResponse()
-    resp.play(audio_url)
-    resp.pause(length=1)
+
+    name = request.form.get("SpeechResult", "")
+
+    if not name:
+        resp.say("I did not hear your name. Please try again later.")
+        return Response(str(resp), mimetype="text/xml")
+
+    reply = f"Thank you {name}. Your response has been recorded."
+
+    filename = f"r_{int(time.time())}.mp3"
+    filepath = f"static/{filename}"
+    generate_voice(reply, filepath)
+
+    resp.play(f"{PUBLIC_BASE_URL}/{filepath}")
     resp.hangup()
+
     return Response(str(resp), mimetype="text/xml")
 
 
-def generate_elevenlabs_tts(text: str, output_file: str) -> None:
-    """
-    Calls ElevenLabs Text-to-Speech API and writes MP3 bytes to output_file.
-    """
+def generate_voice(text, output_file):
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
 
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,
         "Content-Type": "application/json",
-        "Accept": "audio/mpeg",
+        "Accept": "audio/mpeg"
     }
 
     payload = {
         "text": text,
-        # model_id may vary by account; this is a common default
-        "model_id": "eleven_monolingual_v1",
-        "voice_settings": {
-            "stability": 0.45,
-            "similarity_boost": 0.80
-        }
+        "model_id": "eleven_multilingual_v2"
     }
 
     r = requests.post(url, json=payload, headers=headers, timeout=30)
