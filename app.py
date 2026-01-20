@@ -5,7 +5,7 @@ import smtplib
 from email.message import EmailMessage
 from flask import Flask, Response, send_from_directory, request
 from twilio.twiml.voice_response import VoiceResponse
-from openai import OpenAI
+import openai
 
 app = Flask(__name__)
 
@@ -63,23 +63,27 @@ def yes_no(text):
     return "Unclear"
 
 def ai_answer(user_text):
-    """FAST AI response using Twilio voice."""
+    openai.api_key = os.environ.get("OPENAI_API_KEY")
+
     prompt = f"""
 You are a professional probation and reentry assistance AI.
-Respond clearly, respectfully, and calmly.
+Respond clearly, respectfully, and supportively.
 Do not provide legal advice.
-Encourage compliance, stability, and support.
+Encourage compliance and stability.
 
-Client says:
+Client question:
 {user_text}
 """
-    resp = openai_client.chat.completions.create(
+
+    response = openai.ChatCompletion.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
         max_tokens=120
     )
-    return resp.choices[0].message.content.strip()
+
+    return response.choices[0].message["content"].strip()
+
 
 def send_summary(data):
     msg = EmailMessage()
