@@ -5,10 +5,11 @@ import smtplib
 from email.message import EmailMessage
 from flask import Flask, Response, send_from_directory, request
 from twilio.twiml.voice_response import VoiceResponse
+from openai import OpenAI
 
 app = Flask(__name__)
 
-# ---- ENV ----
+# ---------- ENV ----------
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL")
@@ -19,7 +20,9 @@ EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASS = os.environ.get("EMAIL_PASS")
 EMAIL_TO = "artie_swinton@ncwp.uscourts.gov"
 
-# ---- BASIC ROUTES ----
+openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# ---------- BASIC ROUTES ----------
 @app.route("/")
 def health():
     return "OK"
@@ -28,9 +31,10 @@ def health():
 def static_files(filename):
     return send_from_directory("static", filename)
 
-# ---- HELPERS ----
-def generate_voice(text):
-    filename = f"audio_{int(time.time())}.mp3"
+# ---------- HELPERS ----------
+def elevenlabs_voice(text):
+    """Used ONLY for primary prompts (slower but natural)."""
+    filename = f"el_{int(time.time())}.mp3"
     filepath = f"static/{filename}"
 
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
@@ -50,13 +54,32 @@ def generate_voice(text):
 
     return f"{PUBLIC_BASE_URL}/{filepath}"
 
-def yes_no(value):
-    value = value.lower()
-    if "yes" in value:
+def yes_no(text):
+    t = text.lower()
+    if "yes" in t:
         return "Yes"
-    if "no" in value:
+    if "no" in t:
         return "No"
     return "Unclear"
+
+def ai_answer(user_text):
+    """FAST AI response using Twilio voice."""
+    prompt = f"""
+You are a professional probation and reentry assistance AI.
+Respond clearly, respectfully, and calmly.
+Do not provide legal advice.
+Encourage compliance, stability, and support.
+
+Client says:
+{user_text}
+"""
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=120
+    )
+    return resp.choices[0].message.content.strip()
 
 def send_summary(data):
     msg = EmailMessage()
@@ -65,28 +88,20 @@ def send_summary(data):
     msg["To"] = EMAIL_TO
 
     body = f"""
-AI VOICEBOT INTAKE SUMMARY
+AI VOICEBOT SUMMARY
 
 Caller Phone: {data.get("caller")}
 
 Under Supervision: {data.get("supervision")}
 Supervising Officer: {data.get("officer")}
-
-Recent Release (last 30 days): {data.get("recent_release")}
+Recent Release (30 days): {data.get("recent_release")}
 
 Urgent Needs: {data.get("urgent_needs")}
 Urgent Need Details: {data.get("urgent_details")}
 
-Compliance Difficulty: {data.get("compliance_issue")}
-Compliance Details: {data.get("compliance_details")}
-
-Requested Assistance:
+Client Request:
 {data.get("assistance")}
-
-Well-being Support Requested: {data.get("support_needed")}
-Contact Number: {data.get("contact")}
 """
-
     msg.set_content(body)
 
     with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
@@ -94,15 +109,14 @@ Contact Number: {data.get("contact")}
         server.login(EMAIL_USER, EMAIL_PASS)
         server.send_message(msg)
 
-# ---- FLOW ----
+# ---------- FLOW ----------
 
 @app.route("/voice", methods=["POST", "GET"])
 def step_1():
     resp = VoiceResponse()
-    audio = generate_voice(
-        "Are you currently on probation or supervised release? Please say yes or no."
+    audio = elevenlabs_voice(
+        "Hello. Are you currently on probation or supervised release? Please say yes or no."
     )
-
     gather = resp.gather(
         input="speech",
         action="/step-2",
@@ -110,22 +124,22 @@ def step_1():
         speechTimeout="auto"
     )
     gather.play(audio)
-
     resp.say("No response received. Goodbye.")
     return Response(str(resp), mimetype="text/xml")
 
 @app.route("/step-2", methods=["POST"])
 def step_2():
     supervision = yes_no(request.form.get("SpeechResult", ""))
+    resp = VoiceResponse()
 
     if supervision != "Yes":
-        resp = VoiceResponse()
         resp.say("This system is for supervised clients only. Goodbye.")
         resp.hangup()
         return Response(str(resp), mimetype="text/xml")
 
-    resp = VoiceResponse()
-    audio = generate_voice("Who is your supervising officer? Please say their name.")
+    audio = elevenlabs_voice(
+        "Who is your supervising officer? Please say their name."
+    )
     gather = resp.gather(
         input="speech",
         action="/step-3",
@@ -133,64 +147,55 @@ def step_2():
         speechTimeout="auto"
     )
     gather.play(audio)
-
     return Response(str(resp), mimetype="text/xml")
 
 @app.route("/step-3", methods=["POST"])
 def step_3():
     officer = request.form.get("SpeechResult", "Unknown")
-
     resp = VoiceResponse()
-    audio = generate_voice(
+
+    audio = elevenlabs_voice(
         "Have you been released from custody within the past thirty days? Please say yes or no."
     )
     gather = resp.gather(
         input="speech",
-        action="/step-4",
+        action=f"/step-4?officer={officer}",
         method="POST",
         speechTimeout="auto"
     )
     gather.play(audio)
-
-    resp.redirect(f"/step-4?officer={officer}", method="POST")
     return Response(str(resp), mimetype="text/xml")
 
 @app.route("/step-4", methods=["POST"])
 def step_4():
     officer = request.args.get("officer", "Unknown")
     recent_release = yes_no(request.form.get("SpeechResult", ""))
-
     resp = VoiceResponse()
-    audio = generate_voice(
+
+    audio = elevenlabs_voice(
         "Do you have any urgent needs right now such as housing, food, medication, or transportation? Please say yes or no."
     )
     gather = resp.gather(
         input="speech",
-        action="/step-5",
+        action=f"/step-5?officer={officer}&recent_release={recent_release}",
         method="POST",
         speechTimeout="auto"
     )
     gather.play(audio)
-
-    resp.redirect(
-        f"/step-5?officer={officer}&recent_release={recent_release}",
-        method="POST"
-    )
     return Response(str(resp), mimetype="text/xml")
 
 @app.route("/step-5", methods=["POST"])
 def step_5():
     officer = request.args.get("officer")
     recent_release = request.args.get("recent_release")
-    urgent_needs = yes_no(request.form.get("SpeechResult", ""))
-
+    urgent = yes_no(request.form.get("SpeechResult", ""))
     resp = VoiceResponse()
 
-    if urgent_needs == "Yes":
-        audio = generate_voice("Please briefly describe your urgent need.")
+    if urgent == "Yes":
+        audio = elevenlabs_voice("Please briefly describe your urgent need.")
         gather = resp.gather(
             input="speech",
-            action="/step-6",
+            action=f"/step-6?officer={officer}&recent_release={recent_release}&urgent=Yes",
             method="POST",
             speechTimeout="auto"
         )
@@ -198,54 +203,47 @@ def step_5():
         return Response(str(resp), mimetype="text/xml")
 
     resp.redirect(
-        f"/step-6?officer={officer}&recent_release={recent_release}&urgent_needs=No",
+        f"/step-6?officer={officer}&recent_release={recent_release}&urgent=No",
         method="POST"
     )
     return Response(str(resp), mimetype="text/xml")
 
 @app.route("/step-6", methods=["POST"])
 def step_6():
-    data = {
-        "caller": request.form.get("From"),
-        "officer": request.args.get("officer"),
-        "recent_release": request.args.get("recent_release"),
-        "urgent_needs": request.args.get("urgent_needs", "Yes"),
-        "urgent_details": request.form.get("SpeechResult", "None"),
-        "supervision": "Yes"
-    }
+    officer = request.args.get("officer")
+    recent_release = request.args.get("recent_release")
+    urgent = request.args.get("urgent")
+    urgent_details = request.form.get("SpeechResult", "None")
 
     resp = VoiceResponse()
-    audio = generate_voice("How can I assist you today? Please explain.")
+    resp.say("How can I assist you today?")
     gather = resp.gather(
         input="speech",
-        action="/finish",
+        action=f"/finish?officer={officer}&recent_release={recent_release}&urgent={urgent}&urgent_details={urgent_details}",
         method="POST",
         speechTimeout="auto"
     )
-    gather.play(audio)
-
-    resp.redirect("/finish", method="POST")
     return Response(str(resp), mimetype="text/xml")
 
 @app.route("/finish", methods=["POST"])
 def finish():
+    assistance = request.form.get("SpeechResult", "")
+    ai_reply = ai_answer(assistance)
+
     data = {
         "caller": request.form.get("From"),
         "officer": request.args.get("officer"),
         "recent_release": request.args.get("recent_release"),
-        "urgent_needs": request.args.get("urgent_needs"),
+        "urgent_needs": request.args.get("urgent"),
         "urgent_details": request.args.get("urgent_details"),
-        "assistance": request.form.get("SpeechResult"),
-        "support_needed": "Not assessed",
-        "contact": request.form.get("From"),
+        "assistance": assistance,
         "supervision": "Yes"
     }
 
     send_summary(data)
 
     resp = VoiceResponse()
-    resp.say(
-        "Thank you. Your information has been sent for review. Someone will follow up with you soon."
-    )
+    resp.say(ai_reply)
+    resp.say("Thank you. Your information has been sent. Someone will follow up with you.")
     resp.hangup()
     return Response(str(resp), mimetype="text/xml")
