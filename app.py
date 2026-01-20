@@ -22,7 +22,6 @@ EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASS = os.environ.get("EMAIL_PASS")
 EMAIL_TO = "artie_swinton@ncwp.uscourts.gov"
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 # =========================
 # BASIC ROUTES
@@ -68,6 +67,13 @@ def yes_no(text):
     return None
 
 def ai_answer(user_text):
+    api_key = os.environ.get("OPENAI_API_KEY")
+
+    if not api_key:
+        return "I’m unable to answer questions right now, but let’s continue."
+
+    client = OpenAI(api_key=api_key)
+
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -84,7 +90,9 @@ def ai_answer(user_text):
         temperature=0.3,
         max_tokens=120
     )
+
     return response.choices[0].message.content.strip()
+
 
 def interrupt_acknowledge_yesno(user_text):
     yn = yes_no(user_text)
